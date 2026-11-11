@@ -37,6 +37,19 @@ type instance struct {
 	app     *app.App
 	dataDir string
 	logFile *os.File
+
+	// creditsMu 保护 credits 快照：积分数值不在 pool 里持久化查询时间，
+	// 这里单独记录「最近一次查询结果 + 时间 + 错误」，供界面展示。
+	creditsMu sync.Mutex
+	credits   map[string]*creditInfo
+}
+
+// creditInfo 单账号的积分查询结果快照。
+type creditInfo struct {
+	Credits  int64
+	Expiring int64
+	At       int64  // Unix 秒
+	Err      string // 上次查询失败原因（正常为空）
 }
 
 var (
@@ -52,6 +65,17 @@ type AccountView struct {
 	Domain    string `json:"domain"`
 	ExpiresAt int64  `json:"expires_at"`
 	File      string `json:"file"`
+	// Credits 剩余可用积分（最近一次查询值；0 表示尚未查询过或确实为 0）。
+	Credits int64 `json:"credits"`
+	// CreditsExpiring 其中「快过期」的部分（到期时间在 pool.expiring_soon 窗口内）。
+	CreditsExpiring int64 `json:"credits_expiring"`
+	// CreditsAt 积分数值的采样时间（Unix 秒；0 = 从未查询）。
+	CreditsAt int64 `json:"credits_at"`
+	// CreditsErr 上次查询余额的失败原因（空 = 正常）。
+	CreditsErr string `json:"credits_err,omitempty"`
+	// Cooling / Disabled 供界面标红（与 /status 同口径）。
+	Cooling  bool `json:"cooling"`
+	Disabled bool `json:"disabled"`
 }
 
 // Status 运行状态快照（JSON 序列化后交给 Swift 侧）。
@@ -65,6 +89,8 @@ type Status struct {
 	Accounts  []AccountView `json:"accounts"`
 	Available int           `json:"available"`
 	Version   string        `json:"version"`
+	// TotalCredits 所有账号剩余积分之和（供界面顶部一行展示）。
+	TotalCredits int64 `json:"total_credits"`
 }
 
 // Running 返回服务是否在运行。
@@ -155,7 +181,10 @@ func Start(dataDir, listen, apiKey string) error {
 		_ = logFile.Close()
 		return err
 	}
-	inst = &instance{app: a, dataDir: dataDir, logFile: logFile}
+	inst = &instance{app: a, dataDir: dataDir, logFile: logFile, credits: map[string]*creditInfo{}}
+	// 启动后台保活：首次查询余额 + 之后每 5 分 30 秒刷新（与桌面版 balance_refresh 同口径），
+	// 让界面上的积分不会永远是 0。
+	startCreditRefresher(inst)
 	return nil
 }
 
@@ -168,6 +197,7 @@ func Stop() error {
 	}
 	a := inst
 	inst = nil
+	stopCreditRefresher()
 	err := a.app.Stop()
 	if a.logFile != nil {
 		_ = a.logFile.Close()
@@ -195,16 +225,46 @@ func StatusJSON() string {
 
 		auths, err := auth.LoadDir(inst.app.Cfg.AuthDir)
 		if err == nil {
+			// 冷却/禁用状态从 pool 取（与 /status 同口径），一次拿全避免逐号加锁。
+			pooled := map[string]bool{}
+			cooled := map[string]bool{}
+			if inst.app.Pool != nil {
+				for _, ps := range inst.app.Pool.List() {
+					pooled[ps.UID] = ps.Disabled
+					cooled[ps.UID] = ps.Cooling
+				}
+			}
+			inst.creditsMu.Lock()
 			for _, a := range auths {
-				st.Accounts = append(st.Accounts, AccountView{
+				v := AccountView{
 					UID:       a.UID,
 					Nickname:  a.Nickname,
 					Realm:     a.Realm(),
 					Domain:    a.Domain,
 					ExpiresAt: a.ExpiresAt,
 					File:      filepath.Base(a.FilePath),
-				})
+					Disabled:  pooled[a.UID],
+					Cooling:   cooled[a.UID],
+				}
+				// 积分优先用 pool 的权威值（签到/刷新都会写回），
+				// 快照时间与错误只在这里补——pool 不记「什么时候查的」。
+				if inst.app.Pool != nil {
+					if ps, ok := inst.app.Pool.Status(a.UID); ok {
+						v.Credits = ps.Credits
+					}
+				}
+				if ci := inst.credits[a.UID]; ci != nil {
+					if ci.Err == "" {
+						v.Credits = ci.Credits
+					}
+					v.CreditsExpiring = ci.Expiring
+					v.CreditsAt = ci.At
+					v.CreditsErr = ci.Err
+				}
+				st.TotalCredits += v.Credits
+				st.Accounts = append(st.Accounts, v)
 			}
+			inst.creditsMu.Unlock()
 		}
 	}
 	b, err := json.Marshal(st)

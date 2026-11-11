@@ -30,10 +30,37 @@ struct ContentView: View {
             } message: {
                 Text(gw.alert ?? "")
             }
+            .refreshable {
+                // 下拉刷新：先拿状态，再查一次真实积分
+                gw.refresh()
+                if gw.running { gw.refreshCredits() }
+            }
             .onAppear {
                 gw.refresh()
                 if autoStart && !gw.running { gw.start() }
+                // 启动完成后补一次积分查询（后台每 5.5 分钟也会自动刷）
+                if gw.running { gw.refreshCredits() }
             }
+            .overlay(alignment: .bottom) {
+                if let t = gw.toast, !t.isEmpty {
+                    Text(t)
+                        .font(.footnote)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Color(.secondarySystemBackground).opacity(0.97))
+                        .clipShape(Capsule())
+                        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+                        .padding(.bottom, 24)
+                        .transition(.opacity)
+                        .onAppear {
+                            let shown = t
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                if gw.toast == shown { gw.toast = nil }
+                            }
+                        }
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: gw.toast)
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
@@ -61,6 +88,19 @@ struct ContentView: View {
                         Text("账号 \(st.accounts.count) 个 · 可用 \(st.available) 个 · 运行 \(st.uptimeText)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                        HStack(spacing: 6) {
+                            Image(systemName: "creditcard.fill")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                            Text("总积分 \(st.totalCreditsText)")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                            if gw.refreshingCredits {
+                                ProgressView()
+                                    .scaleEffect(0.5)
+                                    .frame(width: 12, height: 12)
+                            }
+                        }
                     } else {
                         Text("点下方按钮启动")
                             .font(.caption)
@@ -105,7 +145,7 @@ struct ContentView: View {
         Section(header: Text("账号池")) {
             if let st = gw.status, !st.accounts.isEmpty {
                 ForEach(st.accounts) { a in
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(a.nickname.isEmpty ? String(a.uid.prefix(8)) : a.nickname)
                                 .font(.subheadline)
@@ -120,7 +160,32 @@ struct ContentView: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
-                        Text(a.domain)
+                        // 积分行：大数字 + 快过期提示
+                        HStack(spacing: 6) {
+                            Image(systemName: "creditcard")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                            Text(a.creditsText)
+                                .font(.system(.subheadline, design: .rounded))
+                                .fontWeight(.semibold)
+                                .foregroundColor(.blue)
+                            Text("积分")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            if a.creditsExpiring > 0 {
+                                Text("· 其中 \(a.creditsExpiring) 将过期")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                            Spacer()
+                            if let s = a.stateText {
+                                Text(s)
+                                    .font(.caption2)
+                                    .foregroundColor(a.creditsErr == nil ? .orange : .red)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Text("\(a.domain) · \(a.creditsTimeText)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -151,6 +216,16 @@ struct ContentView: View {
                     Text("导入 JSON 账号（粘贴 / 文件）")
                 }
             }
+
+            Button(action: { gw.refreshCredits() }) {
+                HStack {
+                    Image(systemName: "arrow.clockwise.icloud")
+                    Text("刷新积分")
+                    Spacer()
+                    if gw.refreshingCredits { ProgressView() }
+                }
+            }
+            .disabled(!gw.running || gw.refreshingCredits)
         }
     }
 

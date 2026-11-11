@@ -134,6 +134,16 @@ func errJSON(err error) string {
 	return string(b)
 }
 
+// WbRefreshCredits 立即刷新所有账号积分；返回刷新成功的账号数（-1 表示未运行）。
+//
+//export WbRefreshCredits
+func WbRefreshCredits() C.int {
+	if !wbios.Running() {
+		return -1
+	}
+	return C.int(wbios.RefreshCredits())
+}
+
 // WbFree 释放由本库返回的 C 字符串。
 //
 //export WbFree

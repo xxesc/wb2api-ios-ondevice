@@ -41,6 +41,7 @@ func modelJSONPath(stateFile string) string {
 type App struct {
 	Cfg      *Config
 	Pool     *pool.Pool
+	Upstream *upstream.Client // 上游客户端（查询余额/积分等短 RPC 复用）
 	Addr     string
 	RedisMod string
 
@@ -207,6 +208,7 @@ func Start(cfg *Config) (*App, error) {
 	a := &App{
 		Cfg:       cfg,
 		Pool:      p,
+		Upstream:  up,
 		Addr:      cfg.Listen,
 		RedisMod:  redisMode,
 		srv:       srv,
